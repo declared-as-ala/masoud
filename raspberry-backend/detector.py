@@ -103,7 +103,11 @@ class DetectionService:
     def _detect_vegetables(self, frame: np.ndarray) -> List[Detection]:
         if self.vegetable_model is None:
             return []
-        return self._run_yolo(frame, self.vegetable_model, allowed_classes={"tomato", "pepper", "felfel"})
+        return self._run_yolo(
+            frame,
+            self.vegetable_model,
+            allowed_classes={"tomato", "pepper", "felfel", "tomato_good", "tomato_bad", "pepper_good", "pepper_bad"},
+        )
 
     def _run_yolo(self, frame: np.ndarray, model: Any, allowed_classes: set[str]) -> List[Detection]:
         try:
@@ -143,6 +147,12 @@ class DetectionService:
         aliases = {
             "human": "person",
             "felfel": "pepper",
+            "tomato_good": "tomato",
+            "tomato_bad": "tomato",
+            "pepper_good": "pepper",
+            "pepper_bad": "pepper",
+            "felfel_good": "pepper",
+            "felfel_bad": "pepper",
         }
         return aliases.get(class_name, class_name)
 
