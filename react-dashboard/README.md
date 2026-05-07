@@ -1,14 +1,15 @@
 # React Dashboard
 
-## Run locally
+## Run
 
 ```bash
 npm install
+cp .env.example .env
 npm run dev
 ```
 
-Create `.env`:
+`.env`:
 
-```bash
+```env
 VITE_RPI_API_URL=http://RASPBERRY_PI_IP:8000
 ```

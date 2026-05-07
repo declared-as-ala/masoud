@@ -1,133 +1,86 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useState } from "react";
+import { api } from "./api";
 import CameraStream from "./components/CameraStream";
-import DetectionPanel from "./components/DetectionPanel";
-import StatsCards from "./components/StatsCards";
-import StatusBadge from "./components/StatusBadge";
-
-const API_URL = import.meta.env.VITE_RPI_API_URL || "http://127.0.0.1:8000";
+import DetectionCards from "./components/DetectionCards";
+import HumanStatus from "./components/HumanStatus";
+import AlertsList from "./components/AlertsList";
+import ConnectionStatus from "./components/ConnectionStatus";
 
 function App() {
-  const [snapshot, setSnapshot] = useState({
-    detections: [],
-    stats: {
-      tomatoes: 0,
-      peppers: 0,
-      bad_vegetables: 0,
-      human_detected: false,
-    },
-    model_ready: false,
-    model_note: "",
+  const [detections, setDetections] = useState({
+    timestamp: "",
+    objects: [],
+    human: { detected: false, authorized: null, name: null },
+    last_alert: null,
   });
+  const [alerts, setAlerts] = useState([]);
   const [connected, setConnected] = useState(false);
-  const wsRef = useRef(null);
-
-  const recentDetections = useMemo(() => {
-    return [...snapshot.detections]
-      .sort((a, b) => b.confidence - a.confidence)
-      .slice(0, 8);
-  }, [snapshot.detections]);
 
   useEffect(() => {
-    let mounted = true;
-    let pollId = null;
-    let wsPingInterval = null;
-
     const fetchDetections = async () => {
       try {
-        const response = await fetch(`${API_URL}/detections`);
-        if (!response.ok) {
-          throw new Error("detections request failed");
-        }
-        const data = await response.json();
-        if (mounted) {
-          setSnapshot(data);
-          setConnected(true);
-        }
-      } catch (err) {
-        if (mounted) {
-          setConnected(false);
-        }
+        const { data } = await api.get("/detections");
+        setDetections(data);
+        setConnected(true);
+      } catch {
+        setConnected(false);
       }
     };
 
-    const connectWs = () => {
-      const wsBase = API_URL.replace("http://", "ws://").replace("https://", "wss://");
-      const ws = new WebSocket(`${wsBase}/ws/detections`);
-      wsRef.current = ws;
-
-      ws.onmessage = (event) => {
-        try {
-          const data = JSON.parse(event.data);
-          if (mounted) {
-            setSnapshot(data);
-            setConnected(true);
-          }
-        } catch (err) {
-          // Ignore invalid payloads and continue polling fallback.
-        }
-      };
-
-      ws.onopen = () => {
-        setConnected(true);
-        wsPingInterval = window.setInterval(() => {
-          if (ws.readyState === WebSocket.OPEN) {
-            ws.send("ping");
-          }
-        }, 4000);
-      };
-
-      ws.onclose = () => {
-        setConnected(false);
-      };
-
-      ws.onerror = () => {
-        setConnected(false);
-      };
+    const fetchAlerts = async () => {
+      try {
+        const { data } = await api.get("/alerts");
+        setAlerts(data?.alerts || []);
+      } catch {
+        // Keep old alerts on transient failure.
+      }
     };
 
     fetchDetections();
-    pollId = window.setInterval(fetchDetections, 1500);
-    connectWs();
+    fetchAlerts();
+    const detectionTimer = window.setInterval(fetchDetections, 1000);
+    const alertsTimer = window.setInterval(fetchAlerts, 5000);
 
     return () => {
-      mounted = false;
-      if (pollId) {
-        window.clearInterval(pollId);
-      }
-      if (wsPingInterval) {
-        window.clearInterval(wsPingInterval);
-      }
-      if (wsRef.current) {
-        wsRef.current.close();
-      }
+      window.clearInterval(detectionTimer);
+      window.clearInterval(alertsTimer);
     };
   }, []);
 
+  const tomatoDetected = detections.objects.some((x) => x.label === "tomato");
+  const pepperDetected = detections.objects.some((x) => x.label === "pepper" || x.label === "felfel");
+  const unauthorized = detections.human?.detected && detections.human?.authorized === false;
+
   return (
     <div className="min-h-screen bg-slate-950 p-6 text-slate-100">
-      <div className="mx-auto grid max-w-7xl grid-cols-1 gap-6 lg:grid-cols-3">
-        <section className="lg:col-span-2">
+      <div className="mx-auto grid max-w-7xl grid-cols-1 gap-6 lg:grid-cols-12">
+        <section className="lg:col-span-8">
           <div className="mb-4 flex items-center justify-between">
             <h1 className="text-2xl font-semibold">Raspberry Pi Vision Dashboard</h1>
-            <StatusBadge
-              label={connected ? "Connected" : "Disconnected"}
-              color={connected ? "green" : "red"}
-            />
+            <ConnectionStatus connected={connected} />
           </div>
-          <CameraStream apiUrl={API_URL} />
+          <CameraStream />
           <div className="mt-4 rounded-xl border border-slate-700 bg-slate-900/60 p-4">
-            <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-slate-300">
-              Model Status
-            </h2>
-            <p className="text-sm text-slate-200">
-              {snapshot.model_note || "Waiting for backend status..."}
+            <p className="text-xs uppercase tracking-wide text-slate-400">Last update</p>
+            <p className="text-sm text-slate-200">{detections.timestamp || "Waiting for data..."}</p>
+            <p className="mt-2 text-sm text-slate-300">
+              Tomato: <b>{tomatoDetected ? "Yes" : "No"}</b> | Pepper: <b>{pepperDetected ? "Yes" : "No"}</b>
             </p>
           </div>
-          <StatsCards stats={snapshot.stats} />
+          <div className="mt-4">
+            <DetectionCards detections={detections} />
+          </div>
         </section>
 
-        <aside className="lg:col-span-1">
-          <DetectionPanel detections={recentDetections} humanDetected={snapshot.stats.human_detected} />
+        <aside className="space-y-4 lg:col-span-4">
+          {unauthorized ? (
+            <div className="rounded-xl border border-rose-700 bg-rose-500/15 p-4">
+              <p className="text-sm font-semibold text-rose-300">Unauthorized human detected</p>
+              <p className="mt-1 text-xs text-rose-200">Telegram alert is sent with cooldown protection.</p>
+            </div>
+          ) : null}
+          <HumanStatus human={detections.human} />
+          <AlertsList alerts={alerts} />
         </aside>
       </div>
     </div>

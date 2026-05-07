@@ -1,13 +1,13 @@
-# Raspberry Pi + React Vegetable Quality Dashboard
+# Raspberry Pi Smart Camera Backend
 
-This project has two parts:
+FastAPI backend for:
+- person detection using pretrained YOLO (`yolov8n.pt`)
+- tomato/pepper detection from pretrained custom model (`models/vegetables.pt`)
+- face authorization using local images in `faces_authorized/`
+- Telegram unauthorized alerts with cooldown
+- MJPEG live stream + REST endpoints for dashboard
 
-- `raspberry-backend` (runs on Raspberry Pi, handles camera + AI + APIs)
-- `react-dashboard` (runs on PC, shows live stream + detections dashboard)
-
-## 1) Raspberry Pi setup
-
-### Install dependencies
+## 1) Install Raspberry Pi dependencies
 
 ```bash
 cd raspberry-backend
@@ -16,129 +16,80 @@ source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### Connect the camera
+## 2) Enable/connect camera
 
-- USB camera: plug in and use default `CAMERA_INDEX=0`.
-- Raspberry Pi Camera Module: enable camera in Raspberry Pi configuration and test with OpenCV.
+- USB camera: use default `CAMERA_INDEX=0`.
+- Raspberry Pi Camera Module: enable camera in Pi settings and reboot.
+- Test camera with OpenCV if needed.
 
-If camera is not found, check:
-- physical connection
-- camera permissions
-- correct `CAMERA_INDEX` value
+If camera fails, `/health` returns `camera_ready: false` and an error message.
 
-### Use OpenCV pretrained mode (no training)
+## 3) Add authorized faces
 
-By default, this backend now uses:
-- OpenCV MobileNet-SSD pretrained model for **person detection**
-- OpenCV HSV/contour heuristics for **tomato/pepper good/bad** (no training)
+Put clear images in:
+- `faces_authorized/ala.jpg`
+- `faces_authorized/technician.jpg`
 
-Set mode with env var (optional, default already set):
+File name becomes the authorized person name on dashboard.
 
-```bash
-export DETECTOR_BACKEND=opencv_pretrained
-```
+## 4) Add pretrained vegetable model
 
-On first run, MobileNet-SSD files are auto-downloaded into:
-- `./models/opencv/MobileNetSSD_deploy.prototxt`
-- `./models/opencv/MobileNetSSD_deploy.caffemodel`
+Put your pretrained model at:
+- `models/vegetables.pt`
 
-You can change folder with:
+Required classes:
+- `tomato`
+- `pepper` (or `felfel`)
 
-```bash
-export OPENCV_MODEL_DIR=./models/opencv
-```
+If file is missing, backend still works and shows warning:
+- `Vegetable model not found. Place your pretrained model at models/vegetables.pt`
 
-### Optional: custom AI model mode
+## 5) Configure Telegram
 
-Create a folder and place your model file:
+Edit hardcoded values in `config.py`:
+- `telegram_bot_token`
+- `telegram_chat_id`
+- `alert_cooldown_seconds`
 
-```bash
-mkdir -p models
-```
+Unauthorized detection sends photo + timestamp + status.
 
-Supported path examples:
-- `./models/vegetable_quality.pt`
-- `./models/vegetable_quality.onnx`
-- `./models/vegetable_quality.tflite` (placeholder integration point in `detector.py`)
-
-Set with env var:
-
-```bash
-export DETECTOR_BACKEND=custom_model
-export MODEL_PATH=./models/vegetable_quality.pt
-```
-
-Your model should output classes:
-- `tomato_good`
-- `tomato_bad`
-- `pepper_good`
-- `pepper_bad`
-- `person`
-
-### Run FastAPI backend
+## 6) Run backend
 
 ```bash
 uvicorn main:app --host 0.0.0.0 --port 8000
 ```
 
-API endpoints:
+Endpoints:
 - `GET /health`
-- `GET /video-feed` (MJPEG stream)
+- `GET /video-feed`
 - `GET /detections`
-- `WS /ws/detections`
+- `GET /alerts`
 
-## 2) React dashboard setup (on PC)
+## 7) Run React dashboard
 
 ```bash
-cd react-dashboard
+cd ../react-dashboard
 npm install
 npm run dev
 ```
 
-Create `.env` in `react-dashboard`:
-
-```bash
-VITE_RPI_API_URL=http://RASPBERRY_PI_IP:8000
-```
-
-## 3) Find Raspberry Pi IP address
-
-On Raspberry Pi:
+## 8) Find Raspberry Pi IP
 
 ```bash
 hostname -I
 ```
 
-Use the shown IP in dashboard `.env`.
+Use that IP in dashboard `.env`.
 
-## 4) Config variables
+## 9) Test stream in browser
 
-Backend config is in `config.py` and reads env vars:
+Open:
+- `http://RASPBERRY_PI_IP:8000/video-feed`
 
-- `CAMERA_INDEX` (default `0`)
-- `DETECTOR_BACKEND` (default `opencv_pretrained`, or `custom_model`)
-- `MODEL_PATH` (default `./models/vegetable_quality.pt`, used in `custom_model` mode)
-- `OPENCV_MODEL_DIR` (default `./models/opencv`)
-- `CONFIDENCE_THRESHOLD` (default `0.4`)
-- `FRAME_WIDTH` (default `640`)
-- `FRAME_HEIGHT` (default `480`)
-- `DETECTION_INTERVAL` (default `3`) -> runs detection every N frames
-- `JPEG_QUALITY` (default `80`)
+## 10) Improve performance on weak Raspberry Pi
 
-## 5) Replace or train model later
-
-1. Train a custom model (YOLOv8/TFLite) for your required classes.
-2. Copy model file to Raspberry Pi (for example into `raspberry-backend/models/`).
-3. Update `MODEL_PATH`.
-4. Restart backend.
-
-For TFLite:
-- `detector.py` already contains a clean placeholder branch for `.tflite`.
-- Add your `tflite-runtime` inference logic in that branch when your model is ready.
-
-## 6) Performance notes (Raspberry Pi)
-
-- Use lightweight model (`yolov8n` or quantized TFLite).
-- Keep frame size small (`640x480` or lower).
-- Increase `DETECTION_INTERVAL` for smoother stream.
-- Use hardware-accelerated camera path if available on your Pi model.
+- keep frame size at `640x480` or lower
+- increase `DETECTION_INTERVAL_FRAMES` (e.g. `6` or `8`)
+- keep `PERSON_MODEL=yolov8n.pt`
+- disable face auth temporarily with `FACE_AUTH_ENABLED=false`
+- increase `FACE_RECHECK_INTERVAL_FRAMES` to reduce recognition load
