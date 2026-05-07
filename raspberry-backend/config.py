@@ -11,7 +11,7 @@ class Settings:
     confidence_threshold: float = 0.5
 
     person_model: str = "yolov8n.pt"
-    vegetable_model_path: str = "models/vegetables.pt"
+    vegetable_model_path: str = "best.onnx"
 
     faces_authorized_dir: str = "faces_authorized"
     face_auth_enabled: bool = True
