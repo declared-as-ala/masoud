@@ -3,6 +3,7 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.request import urlretrieve
 from typing import Any, Dict, List, Optional, Tuple
 
 import cv2
@@ -36,16 +37,30 @@ class Detection:
 
 class DetectionService:
     def __init__(self) -> None:
+        self.detector_backend = settings.detector_backend.lower().strip()
         self.model_path = settings.model_path
+        self.opencv_model_dir = Path(settings.opencv_model_dir)
+        self.person_net = None
         self.model = self._load_model()
         self.latest_detections: List[Detection] = []
         self.latest_timestamp: float = 0.0
-        self.model_ready = self.model is not None
+        self.model_ready = self.model is not None or self.person_net is not None
         self.model_note = self._build_model_note()
 
     def _build_model_note(self) -> str:
+        if self.detector_backend == "opencv_pretrained":
+            if self.person_net is not None:
+                return (
+                    "OpenCV pretrained mode is active. "
+                    "Person detection uses MobileNet-SSD, tomato/pepper quality uses lightweight HSV heuristics."
+                )
+            return (
+                "OpenCV pretrained mode selected, but MobileNet-SSD weights are missing or failed to load. "
+                "Check OPENCV_MODEL_DIR and internet access for first-time auto-download."
+            )
+
         model_file = Path(self.model_path)
-        if self.model_ready:
+        if self.model is not None:
             return f"Model loaded from {model_file.resolve()}"
         if not model_file.exists():
             return (
@@ -58,6 +73,10 @@ class DetectionService:
         )
 
     def _load_model(self) -> Optional[Any]:
+        if self.detector_backend == "opencv_pretrained":
+            self.person_net = self._load_opencv_person_model()
+            return None
+
         path = Path(self.model_path)
         if not path.exists():
             return None
@@ -78,7 +97,41 @@ class DetectionService:
 
         return None
 
+    def _load_opencv_person_model(self) -> Optional[cv2.dnn_Net]:
+        self.opencv_model_dir.mkdir(parents=True, exist_ok=True)
+        prototxt_path = self.opencv_model_dir / "MobileNetSSD_deploy.prototxt"
+        caffemodel_path = self.opencv_model_dir / "MobileNetSSD_deploy.caffemodel"
+
+        if not prototxt_path.exists():
+            try:
+                urlretrieve(
+                    "https://raw.githubusercontent.com/chuanqi305/MobileNet-SSD/master/MobileNetSSD_deploy.prototxt",
+                    str(prototxt_path),
+                )
+            except Exception:
+                return None
+
+        if not caffemodel_path.exists():
+            try:
+                urlretrieve(
+                    "https://github.com/chuanqi305/MobileNet-SSD/raw/master/MobileNetSSD_deploy.caffemodel",
+                    str(caffemodel_path),
+                )
+            except Exception:
+                return None
+
+        try:
+            return cv2.dnn.readNetFromCaffe(str(prototxt_path), str(caffemodel_path))
+        except Exception:
+            return None
+
     def detect(self, frame: np.ndarray) -> Tuple[List[Detection], np.ndarray]:
+        if self.detector_backend == "opencv_pretrained":
+            detections, annotated = self._detect_with_opencv_pretrained(frame)
+            self.latest_detections = detections
+            self.latest_timestamp = time.time()
+            return detections, annotated
+
         if self.model is None:
             self.latest_detections = []
             self.latest_timestamp = time.time()
@@ -128,6 +181,119 @@ class DetectionService:
         self.latest_detections = detections
         self.latest_timestamp = time.time()
         return detections, annotated
+
+    def _detect_with_opencv_pretrained(self, frame: np.ndarray) -> Tuple[List[Detection], np.ndarray]:
+        detections: List[Detection] = []
+        annotated = frame.copy()
+
+        if self.person_net is not None:
+            person_dets = self._detect_persons_mobilenet(frame)
+            detections.extend(person_dets)
+
+        veggie_dets = self._detect_vegetables_heuristic(frame)
+        detections.extend(veggie_dets)
+
+        for det in detections:
+            x1, y1, x2, y2 = det.bbox
+            self._draw_bbox(annotated, (x1, y1, x2, y2), det.label, det.confidence, det.class_name)
+
+        return detections, annotated
+
+    def _detect_persons_mobilenet(self, frame: np.ndarray) -> List[Detection]:
+        if self.person_net is None:
+            return []
+
+        blob = cv2.dnn.blobFromImage(
+            cv2.resize(frame, (300, 300)),
+            scalefactor=0.007843,
+            size=(300, 300),
+            mean=127.5,
+        )
+        self.person_net.setInput(blob)
+        result = self.person_net.forward()
+        h, w = frame.shape[:2]
+        out: List[Detection] = []
+
+        # MobileNet-SSD class id 15 = person.
+        for i in range(result.shape[2]):
+            confidence = float(result[0, 0, i, 2])
+            class_id = int(result[0, 0, i, 1])
+            if class_id != 15 or confidence < settings.confidence_threshold:
+                continue
+
+            box = result[0, 0, i, 3:7] * np.array([w, h, w, h])
+            x1, y1, x2, y2 = box.astype(int).tolist()
+            x1 = max(0, x1)
+            y1 = max(0, y1)
+            x2 = min(w - 1, x2)
+            y2 = min(h - 1, y2)
+            out.append(
+                Detection(
+                    class_name="person",
+                    label=TARGET_CLASSES["person"],
+                    confidence=confidence,
+                    bbox=[x1, y1, x2, y2],
+                    ts=time.time(),
+                )
+            )
+        return out
+
+    def _detect_vegetables_heuristic(self, frame: np.ndarray) -> List[Detection]:
+        """No-training fallback: contour + HSV rules for tomato/pepper quality."""
+        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        out: List[Detection] = []
+
+        red_mask1 = cv2.inRange(hsv, (0, 90, 40), (10, 255, 255))
+        red_mask2 = cv2.inRange(hsv, (160, 90, 40), (179, 255, 255))
+        red_mask = cv2.bitwise_or(red_mask1, red_mask2)
+        green_mask = cv2.inRange(hsv, (35, 60, 30), (90, 255, 255))
+
+        out.extend(self._extract_veggie_from_mask(frame, red_mask, "tomato"))
+        out.extend(self._extract_veggie_from_mask(frame, green_mask, "pepper"))
+        return out
+
+    def _extract_veggie_from_mask(
+        self, frame: np.ndarray, mask: np.ndarray, veggie_type: str
+    ) -> List[Detection]:
+        kernel = np.ones((5, 5), np.uint8)
+        cleaned = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+        cleaned = cv2.morphologyEx(cleaned, cv2.MORPH_CLOSE, kernel)
+
+        contours, _ = cv2.findContours(cleaned, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        detections: List[Detection] = []
+        min_area = (settings.frame_width * settings.frame_height) * 0.01
+
+        for contour in contours:
+            area = cv2.contourArea(contour)
+            if area < min_area:
+                continue
+            x, y, w, h = cv2.boundingRect(contour)
+            roi = frame[y : y + h, x : x + w]
+            if roi.size == 0:
+                continue
+
+            class_name, confidence = self._classify_quality_from_roi(roi, veggie_type)
+            detections.append(
+                Detection(
+                    class_name=class_name,
+                    label=TARGET_CLASSES[class_name],
+                    confidence=confidence,
+                    bbox=[x, y, x + w, y + h],
+                    ts=time.time(),
+                )
+            )
+        return detections
+
+    def _classify_quality_from_roi(self, roi: np.ndarray, veggie_type: str) -> Tuple[str, float]:
+        hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+        sat_mean = float(np.mean(hsv[:, :, 1]))
+        val_mean = float(np.mean(hsv[:, :, 2]))
+        darkness_ratio = float(np.mean(hsv[:, :, 2] < 55))
+
+        good_like = sat_mean > 70 and val_mean > 65 and darkness_ratio < 0.18
+        if veggie_type == "tomato":
+            return ("tomato_good", 0.72) if good_like else ("tomato_bad", 0.66)
+        return ("pepper_good", 0.70) if good_like else ("pepper_bad", 0.64)
 
     def _normalize_class(self, class_name: str) -> str:
         aliases = {

@@ -26,7 +26,29 @@ If camera is not found, check:
 - camera permissions
 - correct `CAMERA_INDEX` value
 
-### Place your AI model
+### Use OpenCV pretrained mode (no training)
+
+By default, this backend now uses:
+- OpenCV MobileNet-SSD pretrained model for **person detection**
+- OpenCV HSV/contour heuristics for **tomato/pepper good/bad** (no training)
+
+Set mode with env var (optional, default already set):
+
+```bash
+export DETECTOR_BACKEND=opencv_pretrained
+```
+
+On first run, MobileNet-SSD files are auto-downloaded into:
+- `./models/opencv/MobileNetSSD_deploy.prototxt`
+- `./models/opencv/MobileNetSSD_deploy.caffemodel`
+
+You can change folder with:
+
+```bash
+export OPENCV_MODEL_DIR=./models/opencv
+```
+
+### Optional: custom AI model mode
 
 Create a folder and place your model file:
 
@@ -42,6 +64,7 @@ Supported path examples:
 Set with env var:
 
 ```bash
+export DETECTOR_BACKEND=custom_model
 export MODEL_PATH=./models/vegetable_quality.pt
 ```
 
@@ -93,7 +116,9 @@ Use the shown IP in dashboard `.env`.
 Backend config is in `config.py` and reads env vars:
 
 - `CAMERA_INDEX` (default `0`)
-- `MODEL_PATH` (default `./models/vegetable_quality.pt`)
+- `DETECTOR_BACKEND` (default `opencv_pretrained`, or `custom_model`)
+- `MODEL_PATH` (default `./models/vegetable_quality.pt`, used in `custom_model` mode)
+- `OPENCV_MODEL_DIR` (default `./models/opencv`)
 - `CONFIDENCE_THRESHOLD` (default `0.4`)
 - `FRAME_WIDTH` (default `640`)
 - `FRAME_HEIGHT` (default `480`)
