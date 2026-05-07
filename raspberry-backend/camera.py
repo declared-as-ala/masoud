@@ -20,12 +20,23 @@ class CameraService:
         self._annotated_frame: Optional[np.ndarray] = None
         self._last_error: Optional[str] = None
         self._frame_counter = 0
+        self._last_start_attempt_ts = 0.0
 
     def start(self) -> None:
         if self._running:
             return
+        self._last_start_attempt_ts = time.time()
 
-        self._capture = cv2.VideoCapture(settings.camera_index)
+        if self._capture is not None:
+            try:
+                self._capture.release()
+            except Exception:
+                pass
+
+        self._capture = cv2.VideoCapture(settings.camera_index, cv2.CAP_DSHOW)
+        if not self._capture or not self._capture.isOpened():
+            self._capture = cv2.VideoCapture(settings.camera_index)
+
         if not self._capture or not self._capture.isOpened():
             self._last_error = (
                 f"Camera index {settings.camera_index} not found. "
@@ -36,6 +47,7 @@ class CameraService:
 
         self._capture.set(cv2.CAP_PROP_FRAME_WIDTH, settings.frame_width)
         self._capture.set(cv2.CAP_PROP_FRAME_HEIGHT, settings.frame_height)
+        self._last_error = None
         self._running = True
         self._thread = threading.Thread(target=self._reader_loop, daemon=True)
         self._thread.start()
@@ -93,3 +105,8 @@ class CameraService:
 
     def get_last_error(self) -> Optional[str]:
         return self._last_error
+
+    def can_retry_start(self, min_retry_seconds: float = 1.5) -> bool:
+        if self._running:
+            return False
+        return (time.time() - self._last_start_attempt_ts) >= min_retry_seconds

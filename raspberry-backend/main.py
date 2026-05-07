@@ -47,6 +47,8 @@ async def detection_loop() -> None:
     while True:
         await asyncio.sleep(0.01)
         if not camera.is_ready():
+            if camera.can_retry_start():
+                camera.start()
             continue
 
         frame_counter = camera.get_frame_counter()
@@ -176,6 +178,11 @@ def get_alerts() -> JSONResponse:
 
 @app.get("/video-feed")
 def video_feed() -> StreamingResponse:
+    if not camera.is_ready():
+        if camera.can_retry_start(min_retry_seconds=0.5):
+            camera.start()
+            time.sleep(0.25)
+
     if not camera.is_ready():
         raise HTTPException(
             status_code=503,
