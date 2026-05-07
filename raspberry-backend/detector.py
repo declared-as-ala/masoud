@@ -242,18 +242,36 @@ class DetectionService:
         """No-training fallback: contour + HSV rules for tomato/pepper quality."""
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
         out: List[Detection] = []
+        frame_area = float(frame.shape[0] * frame.shape[1])
 
-        red_mask1 = cv2.inRange(hsv, (0, 90, 40), (10, 255, 255))
-        red_mask2 = cv2.inRange(hsv, (160, 90, 40), (179, 255, 255))
+        red_mask1 = cv2.inRange(hsv, (0, 120, 45), (10, 255, 255))
+        red_mask2 = cv2.inRange(hsv, (165, 120, 45), (179, 255, 255))
         red_mask = cv2.bitwise_or(red_mask1, red_mask2)
-        green_mask = cv2.inRange(hsv, (35, 60, 30), (90, 255, 255))
+        green_mask = cv2.inRange(hsv, (38, 85, 35), (88, 255, 255))
 
-        out.extend(self._extract_veggie_from_mask(frame, red_mask, "tomato"))
-        out.extend(self._extract_veggie_from_mask(frame, green_mask, "pepper"))
+        # Skin suppression avoids classifying faces/hands as vegetables.
+        skin_mask = self._build_skin_mask(hsv)
+        red_mask = cv2.bitwise_and(red_mask, cv2.bitwise_not(skin_mask))
+        green_mask = cv2.bitwise_and(green_mask, cv2.bitwise_not(skin_mask))
+
+        out.extend(self._extract_veggie_from_mask(frame, red_mask, skin_mask, "tomato", frame_area))
+        out.extend(self._extract_veggie_from_mask(frame, green_mask, skin_mask, "pepper", frame_area))
         return out
 
+    def _build_skin_mask(self, hsv: np.ndarray) -> np.ndarray:
+        # Wide skin range to reject face-like regions from veggie candidates.
+        skin1 = cv2.inRange(hsv, (0, 20, 60), (25, 180, 255))
+        skin2 = cv2.inRange(hsv, (160, 20, 60), (179, 180, 255))
+        skin = cv2.bitwise_or(skin1, skin2)
+        return cv2.GaussianBlur(skin, (5, 5), 0)
+
     def _extract_veggie_from_mask(
-        self, frame: np.ndarray, mask: np.ndarray, veggie_type: str
+        self,
+        frame: np.ndarray,
+        mask: np.ndarray,
+        skin_mask: np.ndarray,
+        veggie_type: str,
+        frame_area: float,
     ) -> List[Detection]:
         kernel = np.ones((5, 5), np.uint8)
         cleaned = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
@@ -261,18 +279,45 @@ class DetectionService:
 
         contours, _ = cv2.findContours(cleaned, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         detections: List[Detection] = []
-        min_area = (settings.frame_width * settings.frame_height) * 0.01
+        min_area = frame_area * settings.veggie_min_area_ratio
+        max_area = frame_area * settings.veggie_max_area_ratio
 
         for contour in contours:
             area = cv2.contourArea(contour)
-            if area < min_area:
+            if area < min_area or area > max_area:
                 continue
             x, y, w, h = cv2.boundingRect(contour)
+            if w <= 0 or h <= 0:
+                continue
+
+            perimeter = cv2.arcLength(contour, True)
+            if perimeter <= 1.0:
+                continue
+
+            circularity = (4.0 * np.pi * area) / (perimeter * perimeter)
+            aspect_ratio = max(w, h) / max(1.0, min(w, h))
+            if not self._passes_shape_filter(veggie_type, circularity, aspect_ratio):
+                continue
+
             roi = frame[y : y + h, x : x + w]
             if roi.size == 0:
                 continue
 
-            class_name, confidence = self._classify_quality_from_roi(roi, veggie_type)
+            roi_mask = cleaned[y : y + h, x : x + w]
+            skin_roi = skin_mask[y : y + h, x : x + w]
+            color_pixels = float(np.count_nonzero(roi_mask))
+            if color_pixels < 1.0:
+                continue
+            skin_overlap = float(np.count_nonzero(cv2.bitwise_and(roi_mask, skin_roi))) / color_pixels
+            if skin_overlap > settings.skin_overlap_limit:
+                continue
+
+            color_purity = color_pixels / float(w * h)
+            class_name, confidence = self._classify_quality_from_roi(
+                roi, veggie_type, circularity, aspect_ratio, color_purity
+            )
+            if confidence < settings.confidence_threshold:
+                continue
             detections.append(
                 Detection(
                     class_name=class_name,
@@ -284,16 +329,32 @@ class DetectionService:
             )
         return detections
 
-    def _classify_quality_from_roi(self, roi: np.ndarray, veggie_type: str) -> Tuple[str, float]:
+    def _passes_shape_filter(self, veggie_type: str, circularity: float, aspect_ratio: float) -> bool:
+        if veggie_type == "tomato":
+            return circularity >= settings.tomato_min_circularity and aspect_ratio <= 1.45
+        return circularity >= 0.22 and aspect_ratio >= settings.pepper_min_aspect_ratio
+
+    def _classify_quality_from_roi(
+        self,
+        roi: np.ndarray,
+        veggie_type: str,
+        circularity: float,
+        aspect_ratio: float,
+        color_purity: float,
+    ) -> Tuple[str, float]:
         hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
         sat_mean = float(np.mean(hsv[:, :, 1]))
         val_mean = float(np.mean(hsv[:, :, 2]))
         darkness_ratio = float(np.mean(hsv[:, :, 2] < 55))
 
         good_like = sat_mean > 70 and val_mean > 65 and darkness_ratio < 0.18
+        shape_score = min(1.0, (circularity if veggie_type == "tomato" else aspect_ratio / 2.0))
+        quality_score = 0.45 * min(1.0, sat_mean / 170.0) + 0.35 * min(1.0, val_mean / 170.0) + 0.20 * shape_score
+        confidence = max(0.50, min(0.95, quality_score * 0.95 * (0.65 + 0.35 * color_purity)))
+
         if veggie_type == "tomato":
-            return ("tomato_good", 0.72) if good_like else ("tomato_bad", 0.66)
-        return ("pepper_good", 0.70) if good_like else ("pepper_bad", 0.64)
+            return ("tomato_good", confidence) if good_like else ("tomato_bad", confidence * 0.9)
+        return ("pepper_good", confidence) if good_like else ("pepper_bad", confidence * 0.9)
 
     def _normalize_class(self, class_name: str) -> str:
         aliases = {

@@ -14,6 +14,11 @@ class Settings:
     detection_interval: int = int(os.getenv("DETECTION_INTERVAL", "3"))
     jpeg_quality: int = int(os.getenv("JPEG_QUALITY", "80"))
     ws_push_interval_ms: int = int(os.getenv("WS_PUSH_INTERVAL_MS", "500"))
+    veggie_min_area_ratio: float = float(os.getenv("VEGGIE_MIN_AREA_RATIO", "0.015"))
+    veggie_max_area_ratio: float = float(os.getenv("VEGGIE_MAX_AREA_RATIO", "0.45"))
+    skin_overlap_limit: float = float(os.getenv("SKIN_OVERLAP_LIMIT", "0.22"))
+    tomato_min_circularity: float = float(os.getenv("TOMATO_MIN_CIRCULARITY", "0.55"))
+    pepper_min_aspect_ratio: float = float(os.getenv("PEPPER_MIN_ASPECT_RATIO", "1.15"))
 
 
 settings = Settings()
